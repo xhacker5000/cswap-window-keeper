@@ -2,20 +2,24 @@
 
 [English README](./README.md)
 
-一个轻量、零第三方依赖的后台守护脚本，基于 [`claude-swap` (`cswap`)](https://github.com/realiti4/claude-swap) 自动保持你本机所有 Claude 订阅账号的 **5 小时使用窗口** 持续运转。
+一个轻量、零第三方依赖的后台守护脚本，自动保持你本机多账号的 **5 小时滚动使用窗口** 持续运转，同时支持：
+
+- **[`cswap`](https://github.com/realiti4/claude-swap)**（Claude Code 多账号切换工具）
+- **`aswap`**（Antigravity CLI / `agy` 多账号切换工具，独立追踪 `gemini` 与 `3p` Claude/GPT 两个额度池）
 
 ## 为什么需要它？
 
-Claude 订阅账号的 5 小时使用窗口在重置后，**下一次重置时间是从重置后你发送第一条消息那一刻开始算的**。如果窗口重置后一直没发消息，空置的时间就白白浪费了。
+订阅账号的 5 小时窗口在重置后，**下一次重置时间是从重置后你发送第一条消息那一刻开始计算的**。如果窗口重置后一直没发消息，空置的时间就白白浪费了。
 
 `cswap-window-keeper` 的解决方式既精准又克制：
 
-1. **精准预约唤醒（不频繁轮询）**：
-   - 调用 `cswap list --json` 获取所有已启用订阅账号的 5 小时窗口状态（`usage.fiveHour.resetsAt`）。
-   - 若账号当前 5h 窗口活跃，记录其 `resetsAt` 并直接睡到 **`resetsAt + 60s`**（例如 2h10m 后重置，就在 2h11m 唤醒检查），几乎零多余请求。
+1. **分 Provider 独立预约唤醒（不频繁轮询）**：
+   - 支持 `cswap list --json` 和 `aswap list --probe-all --json`（默认 `--providers auto` 自动识别本机已安装的工具）。
+   - 每个 provider 独立计时唤醒：`cswap` 到点检查时不会多余探测 `aswap`，反之亦然。
+   - 记录每个活跃 5h 窗口的 `resetsAt` 并直接睡到 **`resetsAt + 60s`**（如 2h10m 后重置就在 2h11m 唤醒检查）。
    - 内部按 ≤ 30s 分段对比墙钟时间睡眠，Mac 合盖休眠唤醒后能第一时间补检，不会漏掉重置点。
-2. **Session 模式最小 Token 唤醒（不干扰当前登录账号）**：
-   - 到达重置点后若确认该账号空闲（`pct == 0` 且无活跃 `resetsAt`），通过 `cswap run <slot>`（session 模式，不会切换你当前默认账号）发送一条极简消息：
+2. **不干扰全局登录的最小 Token 唤醒**：
+   - **`cswap`（Claude Code）**：使用隔离 session 模式（`cswap run <slot>`），不切换默认账号：
      ```bash
      cswap run <slot> -- \
        -p "say test" \
@@ -27,56 +31,57 @@ Claude 订阅账号的 5 小时使用窗口在重置后，**下一次重置时�
        --effort low \
        --output-format json
      ```
-   - 单次唤醒约消耗 **2 input + 3 output tokens（约 $0.0001）**。
+     单次唤醒约消耗 **2 input + 3 output tokens（约 $0.0001）**。
+   - **`aswap`（Antigravity CLI / `agy`）**：按额度池（`gemini` / `3p`）分别监控，自动跳过无 5h 窗口的周限额套餐（`fiveHour: null`），通过 `aswap run <slot>` 唤醒并保持全局默认登录不变：
+     ```bash
+     # Gemini 池（默认模型：gemini-3.8-flash-low）
+     aswap run <slot> -- -p "say test" --model gemini-3.8-flash-low --disable-slash-commands --output-format json
+
+     # 3P Claude/GPT 池（默认模型：gpt-oss-120b-medium）
+     aswap run <slot> -- -p "say test" --model gpt-oss-120b-medium --disable-slash-commands --output-format json
+     ```
 3. **尊重缓存与限流机制**：
-   - 严格尊重 `cswap` 的 180s usage 缓存（`SERVE_TTL_S`）：不会把重置前或 ping 前的旧缓存误判为实时状态；ping 完成后等待 ~192s 自动回查一次，锁定服务端分配的精确新 `resetsAt`，随后进入下一轮 ~5 小时休眠，周而复始。
-   - 尊重 HTTP 429 的 `usageRetryAt` 退避时间。
-   - 内置同账号 10 分钟防重复 ping 冷却、文件锁防多开；自动跳过已禁用账号、API Key 账号、需重新登录的账号以及 7 天周配额已用尽（100%）的账号。
+   - 对 `cswap` 严格尊重 180s usage 缓存（`SERVE_TTL_S`），ping 后等待 ~192s 回查确认精确的新 `resetsAt`，并尊重 HTTP 429 的 `usageRetryAt`。
+   - 对 `aswap` 通过 `--probe-all` 实时探测，ping 后约 15s 即可回查确认精确的新 `resetsAt`。
+   - 内置同账号/同池 10 分钟防重复 ping 冷却、文件锁防多开；自动跳过已禁用账号、API Key 账号、需重登账号、无 5h 窗口的周限额套餐以及 7 天周配额已用尽（100%）的目标。
 
 ---
 
 ## 环境与依赖安装
 
-`cswap-window-keeper` 本身仅依赖 **Python 3.9+ 标准库**（无需 `pip install` 任何第三方包），运行前请确保本机已安装并配置好以下工具：
+`cswap-window-keeper` 本身仅依赖 **Python 3.9+ 标准库**（无需 `pip install` 任何第三方包）。按需安装你要保活的 CLI 工具即可：
 
 ### 1. Python 3.9+
 - **macOS**：自带 `/usr/bin/python3`（或 Xcode Command Line Tools）即可直接运行。
 - **Linux**：确保 `python3 --version` 为 3.9 及以上版本。
 
-### 2. Claude Code CLI (`claude`)
-安装官方 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)：
-```bash
-# 通过 npm 安装（需要 Node.js 18+）
-npm install -g @anthropic-ai/claude-code
+### 2. 使用 `cswap`（Claude Code）
+- 安装官方 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)：
+  ```bash
+  npm install -g @anthropic-ai/claude-code
+  claude --version
+  ```
+- 安装 [`realiti4/claude-swap`](https://github.com/realiti4/claude-swap)（建议 v0.27+）：
+  ```bash
+  # 推荐：使用 uv 安装
+  uv tool install claude-swap
+  # 或使用 pipx 安装
+  pipx install claude-swap
 
-# 验证安装
-claude --version
-```
+  # 录入你的 Claude 订阅账号
+  cswap add
+  cswap list --json
+  ```
 
-### 3. `claude-swap` (`cswap`)
-安装 [`realiti4/claude-swap`](https://github.com/realiti4/claude-swap)（建议 v0.27+，支持 `list --json` 与 `run` session 模式）：
+### 3. 使用 `aswap`（Antigravity CLI / `agy`，可选）
+- 安装 Antigravity CLI (`agy`) 以及支持 `aswap` 的 `claude-swap` 版本。
+- 录入你的 `agy` 账号并验证：
+  ```bash
+  aswap add
+  aswap list --probe-all --json
+  ```
 
-```bash
-# 推荐：使用 uv 安装
-uv tool install claude-swap
-
-# 或使用 pipx 安装
-pipx install claude-swap
-
-# 验证安装
-cswap --version
-```
-
-将你的 Claude 订阅账号录入 `cswap`：
-```bash
-# 依次在 Claude Code 中登录各个订阅账号后执行：
-cswap add
-
-# 确认 cswap 能正常输出 JSON 与 5 小时窗口信息：
-cswap list --json
-```
-
-> **提示**：请确认 `~/.local/bin` 已加入你的 shell `PATH` 环境变量。
+> **提示**：请确认 `~/.local/bin` 已加入你的 shell `PATH`。默认 `--providers auto` 会自动忽略未安装的 provider，只运行本机已装好的工具。
 
 ---
 
@@ -111,7 +116,7 @@ python3 cswap_window_keeper.py install
 
 ```ini
 [Unit]
-Description=cswap-window-keeper (Claude 5-hour window keeper)
+Description=cswap-window-keeper (5-hour window keeper for cswap & aswap)
 After=network-online.target
 
 [Service]
@@ -137,7 +142,7 @@ systemctl --user enable --now cswap-window-keeper
 macOS 执行 `install` 后可直接使用全局命令 `cswap-window-keeper`（也可使用 `python3 cswap_window_keeper.py ...`）：
 
 ```bash
-# 查看后台服务状态、各账号 5h 重置时间与下次唤醒时间
+# 查看后台服务状态、cswap/aswap 各账号 5h 重置时间与下次唤醒时间
 cswap-window-keeper status
 
 # 查看运行日志 / 实时跟踪日志
@@ -161,26 +166,34 @@ cswap-window-keeper uninstall
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| `--providers LIST` | `auto` | 监控的 provider：`auto`（自动检测全部）、`cswap`、`aswap` 或 `cswap,aswap` |
 | `--grace SECONDS` | `60` | 5h 重置后延迟多少秒再检查/唤醒 |
-| `--cooldown SECONDS` | `600` | 同账号两次 ping 之间的最小冷却秒数 |
-| `--model ALIAS` | `haiku` | 唤醒时使用的 Claude 模型别名 |
+| `--cooldown SECONDS` | `600` | 同账号/同额度池两次 ping 之间的最小冷却秒数 |
+| `--model ALIAS` | `haiku` | `cswap` 唤醒时使用的 Claude 模型别名 |
+| `--aswap-pools LIST` | `gemini,3p` | `aswap` 监控的额度池（逗号分隔：`gemini`、`3p`） |
+| `--aswap-gemini-model ID` | `gemini-3.8-flash-low` | `aswap` 唤醒 `gemini` 池使用的 `agy` 模型 ID |
+| `--aswap-3p-model ID` | `gpt-oss-120b-medium` | `aswap` 唤醒 `3p`（Claude/GPT）池使用的 `agy` 模型 ID |
 | `--prompt TEXT` | `say test` | 唤醒空闲窗口时发送的提示词 |
-| `--accounts LIST` | *(全部启用账号)* | 仅监控指定账号（逗号分隔的槽位号/邮箱/别名） |
+| `--accounts LIST` | *(全部启用账号)* | 仅监控指定账号（支持 `1,2` 或带前缀 `cswap:1,aswap:1`） |
 | `--state-dir PATH` | `~/.local/state/cswap-window-keeper` | 状态文件与日志存放目录 |
 | `-v, --verbose` | `false` | 输出详细调试日志 |
 
-示例——仅监控账号 1 和 2，重置后延迟 90 秒检查：
+示例：
 ```bash
-python3 cswap_window_keeper.py --grace 90 --accounts 1,2 install
+# 仅监控 aswap 的 gemini 池
+python3 cswap_window_keeper.py --providers aswap --aswap-pools gemini install
+
+# 同时监控 cswap 和 aswap，重置后延迟 90 秒检查
+python3 cswap_window_keeper.py --providers cswap,aswap --grace 90 install
 ```
 
 ---
 
 ## 隐私与安全说明
 
-- 本工具**不读取、不保存、不上传任何账号凭证或 OAuth Token**，全部鉴权交由你本机的 `cswap` 与 `claude` 完成。
+- 本工具**不读取、不保存、不上传任何账号凭证或 OAuth Token**，全部鉴权交由你本机的 `cswap`、`aswap`、`claude` 与 `agy` 完成。
 - 运行状态与轮转日志仅保存在本机 `~/.local/state/cswap-window-keeper/`（`state.json`、`keeper.log`、`daemon.lock`）。
-- 唤醒调用在独立空工作目录中以 `--safe-mode --tools "" --no-session-persistence` 执行，不会读取你的项目文件、`CLAUDE.md`、hooks 或 MCP 服务。
+- 唤醒调用在独立空工作目录中以最小参数执行（`claude` 使用 `--safe-mode --tools "" --no-session-persistence`，`agy` 使用 `--disable-slash-commands`）。
 
 ## 开发与测试
 
