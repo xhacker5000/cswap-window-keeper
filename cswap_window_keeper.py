@@ -1399,12 +1399,50 @@ def service_runtime_status() -> Tuple[bool, Optional[str]]:
     return True, pid
 
 
+def systemd_runtime_status() -> Tuple[str, Optional[str], Optional[str]]:
+    """Return (scope, active_state, pid) for systemd on Linux."""
+    unit = "cswap-window-keeper.service"
+    for scope, base_cmd in (
+        ("system", ["systemctl"]),
+        ("user", ["systemctl", "--user"]),
+    ):
+        try:
+            res = subprocess.run(
+                [*base_cmd, "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except OSError:
+            continue
+        if res.returncode != 0:
+            continue
+        vals: Dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                vals[k.strip()] = v.strip()
+        if vals.get("LoadState") == "loaded":
+            pid = vals.get("MainPID")
+            return scope, vals.get("ActiveState") or "unknown", (pid if pid and pid != "0" else None)
+    return "none", None, None
+
+
 def cmd_status(cfg: KeeperConfig) -> int:
-    loaded, pid = service_runtime_status()
-    plist_exists = PLIST_PATH.exists()
-    print(f"Service: {SERVICE_LABEL}")
-    print(f"  Plist:   {PLIST_PATH} ({'installed' if plist_exists else 'not installed'})")
-    print(f"  Status:  {'running (pid=' + pid + ')' if loaded and pid else ('loaded (not running)' if loaded else 'stopped')}")
+    if sys.platform == "darwin":
+        loaded, pid = service_runtime_status()
+        plist_exists = PLIST_PATH.exists()
+        print(f"Service: {SERVICE_LABEL}")
+        print(f"  Plist:   {PLIST_PATH} ({'installed' if plist_exists else 'not installed'})")
+        print(f"  Status:  {'running (pid=' + pid + ')' if loaded and pid else ('loaded (not running)' if loaded else 'stopped')}")
+    else:
+        scope, active_state, pid = systemd_runtime_status()
+        print("Service: cswap-window-keeper.service (systemd)")
+        if scope == "none":
+            print("  Status:  not installed")
+        else:
+            pid_part = f", pid={pid}" if pid else ""
+            print(f"  Status:  {active_state} ({scope}{pid_part})")
     print(f"  State:   {cfg.state_file}")
     print(f"  Log:     {cfg.log_file}")
 
